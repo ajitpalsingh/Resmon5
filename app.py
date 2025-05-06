@@ -2,6 +2,15 @@
 # Integrated application that combines visualization dashboards with AI-powered project management assistant
 
 import streamlit as st
+
+# Page configuration and title must come before any other Streamlit commands
+st.set_page_config(
+    page_title="JIRA Resource Management App",
+    page_icon="📊",
+    layout="wide"
+)
+
+# Continue with other imports
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -15,12 +24,19 @@ import re  # Add global import for regular expressions
 from utils import load_data
 from fpdf import FPDF  # Import FPDF globally
 
-# Page configuration and title
-st.set_page_config(
-    page_title="JIRA Resource Management App",
-    page_icon="📊",
-    layout="wide"
-)
+# Import our custom modules
+from ai_task_redistribution import ai_based_task_redistribution
+from leave_conflict_detection import detect_leave_conflicts
+from token_management import TokenManager, optimize_prompt
+
+# Import new Phase 1 AI features
+from project_health_summary import generate_project_health_summary
+from task_prioritization import ai_driven_task_prioritization
+from effort_estimation import effort_estimation_refinement
+
+# Import Phase 3 features
+from technical_debt_risk_management import technical_debt_risk_management
+from sprint_planning_assistant import sprint_planning_assistant
 
 # Initialize session state variables - crucial for feedback system
 if 'feedback_history' not in st.session_state:
@@ -74,16 +90,18 @@ if os.path.exists(zip_file_path):
 
 # ---------- Load Data ----------
 # Initialize global variables
-issues_df, skills_df, worklogs_df, leaves_df = None, None, None, None
+issues_df, skills_df, worklogs_df, leaves_df, tech_debt_df = None, None, None, None, None
 
 # Load data from file
 if uploaded_file is not None:
-    issues_df, skills_df, worklogs_df, leaves_df = load_data(uploaded_file)
+    issues_df, skills_df, worklogs_df, leaves_df, tech_debt_df = load_data(uploaded_file)
 
 # ---------- Navigation Tabs ----------
 nav_options = [
     "📊 Dashboard",
     "📋 PM Daily Brief",
+    "🔍 Technical Debt & Risk",
+    "🏃‍♀️ Sprint Planning", 
     "🤖 AI PM Buddy"
 ]
 
@@ -357,6 +375,7 @@ def treemap_resource_distribution():
 
 # ---------- Dashboard ----------
 def dashboard():
+    global issues_df, skills_df, worklogs_df, leaves_df
     st.title("📊 JIRA Resource Management Dashboard")
     if issues_df is None or skills_df is None or worklogs_df is None:
         st.warning("Please upload a valid JIRA Excel file using the sidebar.")
@@ -440,7 +459,7 @@ def dashboard():
     
     # --------- Primary Visualizations (Middle Sections) ---------
     # Create a tabbed interface for different visualization categories
-    viz_tabs = st.tabs(["📊 Status & Progress", "📅 Timeline & Gantt", "👥 Resource Analysis", "📡 Skill Distribution"])
+    viz_tabs = st.tabs(["📊 Status & Progress", "📅 Timeline & Gantt", "👥 Resource Analysis", "📡 Skill Distribution", "🔍 Data Integrity"])
     
     # Tab 1: Status & Progress
     with viz_tabs[0]:
@@ -496,36 +515,145 @@ def dashboard():
                 st.info("No data available with current filters.")
         
         # Add Burnup Chart beneath the two columns
-        st.subheader("📈 Sprint Burnup Chart")
+        st.subheader("📈 Sprint Burnup Chart (Updated)")
         if not filtered_issues_df.empty and 'Start Date' in filtered_issues_df.columns and 'Due Date' in filtered_issues_df.columns:
+            # Convert date columns to datetime
             filtered_issues_df['Start Date'] = pd.to_datetime(filtered_issues_df['Start Date'], errors='coerce')
             filtered_issues_df['Due Date'] = pd.to_datetime(filtered_issues_df['Due Date'], errors='coerce')
             
-            if not filtered_issues_df['Start Date'].isna().all() and not filtered_issues_df['Due Date'].isna().all():
-                date_range = pd.date_range(start=filtered_issues_df['Start Date'].min(), end=filtered_issues_df['Due Date'].max())
-                burnup_data = pd.DataFrame({'Date': date_range})
-                burnup_data['Completed'] = burnup_data['Date'].apply(
-                    lambda d: filtered_issues_df[(filtered_issues_df['Status'] == 'Done') & 
-                                             (filtered_issues_df['Due Date'] <= d)]['Story Points'].sum()
-                )
-                burnup_data['Total Scope'] = filtered_issues_df['Story Points'].sum()
+            # Create a copy of the dataframe for manipulation
+            burnup_df = filtered_issues_df.copy()
+            
+            # Inference for resolution date based on Status
+            # For Done items, we'll use the Due Date as the completion date
+            # For non-Done items, they haven't been completed yet
+            current_date = pd.to_datetime('today')
+            
+            # Create inferred Resolution Date for visualization
+            burnup_df['Inferred Resolution Date'] = None
+            
+            # For 'Done' status, use Due Date as the completion date
+            # If Due Date is missing or in future, use today's date
+            mask_done = (burnup_df['Status'] == 'Done')
+            burnup_df.loc[mask_done, 'Inferred Resolution Date'] = burnup_df.loc[mask_done, 'Due Date']
+            
+            # If inferred date is in the future, use today instead
+            mask_future = (burnup_df['Inferred Resolution Date'] > current_date) | (burnup_df['Inferred Resolution Date'].isna())
+            burnup_df.loc[mask_done & mask_future, 'Inferred Resolution Date'] = current_date
+            
+            # Convert to datetime format
+            burnup_df['Inferred Resolution Date'] = pd.to_datetime(burnup_df['Inferred Resolution Date'], errors='coerce')
+            
+            if not burnup_df['Start Date'].isna().all():
+                # Create date range from earliest start date to latest due date (or today if all past)
+                latest_date = max(burnup_df['Due Date'].max(), current_date)
+                date_range = pd.date_range(start=burnup_df['Start Date'].min(), end=latest_date)
                 
+                # Create dataframe for burnup chart
+                burnup_data = pd.DataFrame({'Date': date_range})
+                
+                # Calculate completed story points by date
+                # A task is completed if Status is Done and Inferred Resolution Date is on or before the date
+                burnup_data['Completed'] = burnup_data['Date'].apply(
+                    lambda d: burnup_df[(burnup_df['Status'] == 'Done') & 
+                                         (burnup_df['Inferred Resolution Date'] <= d)]['Story Points'].sum()
+                )
+                
+                # Total scope line (all story points in the filtered dataset)
+                burnup_data['Total Scope'] = burnup_df['Story Points'].sum()
+                
+                # Add ideal burnup line (linear progression from start to end)
+                start_date = burnup_data['Date'].min()
+                end_date = burnup_data['Date'].max()
+                total_days = (end_date - start_date).days
+                
+                if total_days > 0:  # Avoid division by zero
+                    total_scope = burnup_data['Total Scope'].iloc[0]
+                    
+                    # Calculate ideal burnup for each day
+                    burnup_data['Ideal'] = burnup_data['Date'].apply(
+                        lambda d: min(total_scope, total_scope * ((d - start_date).days / total_days))
+                    )
+                else:
+                    burnup_data['Ideal'] = burnup_data['Total Scope']
+                
+                # Create plotly figure
                 fig = go.Figure()
+                
+                # Actual completed line
                 fig.add_trace(go.Scatter(
-                    x=burnup_data['Date'], y=burnup_data['Completed'], mode='lines+markers', name='Completed'
+                    x=burnup_data['Date'], 
+                    y=burnup_data['Completed'], 
+                    mode='lines+markers', 
+                    name='Completed',
+                    line=dict(color='green'),
+                    hovertemplate='%{x}<br>Completed: %{y:.1f} points'
                 ))
+                
+                # Ideal burnup line
                 fig.add_trace(go.Scatter(
-                    x=burnup_data['Date'], y=[burnup_data['Total Scope'].iloc[0]]*len(burnup_data),
-                    mode='lines', name='Total Scope', line=dict(dash='dash')
+                    x=burnup_data['Date'], 
+                    y=burnup_data['Ideal'], 
+                    mode='lines', 
+                    name='Ideal Progress',
+                    line=dict(dash='dot', color='orange'),
+                    hovertemplate='%{x}<br>Ideal: %{y:.1f} points'
                 ))
+                
+                # Total scope line
+                fig.add_trace(go.Scatter(
+                    x=burnup_data['Date'], 
+                    y=[burnup_data['Total Scope'].iloc[0]]*len(burnup_data),
+                    mode='lines', 
+                    name='Total Scope', 
+                    line=dict(dash='dash', color='red'),
+                    hovertemplate='%{x}<br>Total: %{y:.1f} points'
+                ))
+                
+                # Update layout with better formatting
                 fig.update_layout(
                     title=f'Sprint Burnup Chart {"for " + selected_sprint if selected_sprint != "All Sprints" else ""}',
                     xaxis_title='Date', 
-                    yaxis_title='Story Points'
+                    yaxis_title='Story Points',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    hovermode='x unified'
                 )
+                
+                # Note: Vertical line for today has been temporarily disabled due to Plotly compatibility issues
+                # We will add a marker instead to show today's date on the x-axis
+                # Add 'Today' marker to the chart
+                current_completed = burnup_data[burnup_data['Date'] <= current_date]['Completed'].iloc[-1] if not burnup_data[burnup_data['Date'] <= current_date].empty else 0
+                
+                # Format the current date for display
+                today_str = current_date.strftime('%Y-%m-%d')
+                
+                # Add annotation instead of vertical line
+                fig.add_annotation(
+                    x=today_str,
+                    y=current_completed,
+                    text="Today",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=0,
+                    ay=-40
+                )
+                
                 st.plotly_chart(fig, use_container_width=True)
+                
+                # Add explanation of the chart
+                with st.expander("ℹ️ How this chart works"):
+                    st.markdown("""
+                    **About the improved Burnup Chart:**
+                    - **Green line**: Shows actual completed story points based on tasks with 'Done' status
+                    - **Orange dotted line**: Shows ideal progress (linear progression from start to end)
+                    - **Red dashed line**: Shows the total scope of work (total story points)
+                    - **Vertical line**: Marks today's date
+                    
+                    For tasks with 'Done' status, we use the due date as the completion date (or today's date if the due date is in the future).
+                    This provides a more accurate picture of progress over time than using just the due date.
+                    """)
             else:
-                st.warning("Start Date or Due Date missing in all records. Cannot build burnup chart.")
+                st.warning("Start Date missing in all records. Cannot build burnup chart.")
         else:
             st.info("No data available for burnup chart with current filters.")
     
@@ -669,15 +797,21 @@ def dashboard():
     # Tab 4: Skill Distribution
     with viz_tabs[3]:
         st.subheader("📡 Radar Chart - Resource Skills")
-        if skills_df is not None and 'Resource' in skills_df.columns and 'Skillset' in skills_df.columns:
+        # Check for the Resource or Name column and standardize if needed
+        if skills_df is not None:
+            if 'Resource' in skills_df.columns and 'Name' not in skills_df.columns:
+                # Rename Resource to Name for consistency
+                skills_df = skills_df.rename(columns={'Resource': 'Name'})
+                
+        if skills_df is not None and 'Name' in skills_df.columns and 'Skillset' in skills_df.columns:
             # Filter the skills data if a resource is selected
             filtered_skills_df = skills_df.copy()
             if selected_resource != "All Resources":
-                filtered_skills_df = filtered_skills_df[filtered_skills_df['Resource'] == selected_resource]
+                filtered_skills_df = filtered_skills_df[filtered_skills_df['Name'] == selected_resource]
             
             # Define a function to extract top N resources by a specific skill
             def get_top_resources_by_skill(skill_df, skill_name, top_n=5):
-                skill_counts = skill_df[skill_df['Skillset'] == skill_name]['Resource'].value_counts()
+                skill_counts = skill_df[skill_df['Skillset'] == skill_name]['Name'].value_counts()
                 return skill_counts.nlargest(top_n)
             
             # Create a combined radar chart based on skills
@@ -699,7 +833,7 @@ def dashboard():
                             fig = px.line_polar(
                                 resource_skills, 
                                 r="Proficiency", 
-                                theta="Resource", 
+                                theta="Name", 
                                 line_close=True,
                                 title=f"{selected_resource}'s {skill_category} Skills"
                             )
@@ -711,7 +845,7 @@ def dashboard():
                         category_skills = filtered_skills_df[filtered_skills_df['Skillset'] == skill_category]
                         if not category_skills.empty:
                             # Count occurrences of each resource with this skill
-                            skill_counts = category_skills['Resource'].value_counts().reset_index()
+                            skill_counts = category_skills['Name'].value_counts().reset_index()
                             skill_counts.columns = ['Resource', 'Count']
                             
                             fig = px.bar(
@@ -726,13 +860,358 @@ def dashboard():
             else:
                 st.info("No skills data available with current filters.")
                 
+            # Add skill-task matching functionality
+            st.subheader("🔗 Skill-Task Matching")
+            if not filtered_skills_df.empty and issues_df is not None and 'Summary' in issues_df.columns:
+                # Create a skill-task mapping tool
+                with st.expander("👁️ View Skill-Task Matching Analysis"):
+                    st.markdown("""
+                    ### About Skill-Task Matching
+                    This feature identifies tasks that match the skills of each resource, helping with optimal task allocation.
+                    The matching is performed by comparing task summaries with resource skillsets.
+                    """)
+                    
+                    # Create a list of all unique skills
+                    all_skills = filtered_skills_df['Skillset'].dropna().unique().tolist()
+                    
+                    # Create a dictionary mapping skills to keywords
+                    skill_keywords = {}
+                    for skill in all_skills:
+                        # Default keywords based on skill name (with expanded terms)
+                        default_keywords = [skill.lower()]
+                        
+                        # Enhanced keyword mapping for more comprehensive matching
+                        # General programming and development keywords
+                        if 'Dev' in skill or 'Developer' in skill:
+                            default_keywords.extend(['develop', 'code', 'implement', 'build', 'feature', 'functionality', 
+                                                    'programming', 'software', 'fix', 'issue', 'bug', 'create', 'update'])
+                        
+                        # QA and Testing related keywords
+                        if 'QA' in skill or 'Test' in skill or 'Quality' in skill:
+                            default_keywords.extend(['test', 'quality', 'assurance', 'verify', 'validation', 'check',
+                                                    'bug', 'defect', 'regression', 'automate', 'automation', 'junit'])
+                        
+                        # DevOps related keywords
+                        if 'DevOps' in skill or 'Operation' in skill:
+                            default_keywords.extend(['ci/cd', 'pipeline', 'deploy', 'kubernetes', 'docker', 'jenkins',
+                                                    'infrastructure', 'automation', 'deployment', 'gitops', 'k8s',
+                                                    'config', 'configuration', 'monitor', 'cloud', 'aws', 'azure'])
+                        
+                        # Project management keywords
+                        if 'PM' in skill or 'Project' in skill or 'Manager' in skill or 'Management' in skill:
+                            default_keywords.extend(['manage', 'plan', 'coordinate', 'organize', 'prioritize',
+                                                    'schedule', 'scrum', 'agile', 'kanban', 'meeting', 'stakeholder',
+                                                    'report', 'status', 'timeline', 'milestone', 'roadmap'])
+                        
+                        # Tech Lead keywords
+                        if 'Lead' in skill or 'Tech Lead' in skill or 'Technical Lead' in skill:
+                            default_keywords.extend(['lead', 'architect', 'design', 'review', 'mentor', 'guide',
+                                                    'direct', 'technical', 'decision', 'architecture', 'strategy'])
+                        
+                        # Backend development
+                        if 'Backend' in skill or 'Back' in skill or 'Back-end' in skill:
+                            default_keywords.extend(['api', 'server', 'database', 'db', 'rest', 'microservice',
+                                                    'endpoint', 'service', 'backend', 'data', 'storage'])
+                        
+                        # Frontend development
+                        if 'Frontend' in skill or 'Front' in skill or 'Front-end' in skill or 'UI' in skill:
+                            default_keywords.extend(['html', 'css', 'javascript', 'react', 'angular', 'vue', 'ui', 'ux',
+                                                   'interface', 'component', 'frontend', 'responsive', 'design'])
+                        
+                        # Add specific programming languages
+                        if 'Java' in skill:
+                            default_keywords.extend(['java', 'spring', 'jvm', 'maven', 'gradle', 'j2ee', 'jakarta'])
+                        elif 'Python' in skill:
+                            default_keywords.extend(['python', 'django', 'flask', 'numpy', 'pandas', 'pytest', 'pip'])
+                        elif 'JavaScript' in skill or 'JS' in skill:
+                            default_keywords.extend(['javascript', 'js', 'node', 'react', 'vue', 'angular', 'typescript'])
+                        elif '.NET' in skill or 'C#' in skill:
+                            default_keywords.extend(['c#', '.net', 'asp.net', 'core', 'entity', 'framework'])
+                        
+                        # Database skills
+                        if 'Database' in skill or 'DB' in skill or 'SQL' in skill:
+                            default_keywords.extend(['sql', 'nosql', 'mongodb', 'postgres', 'oracle', 'db', 'query',
+                                                   'mysql', 'database', 'data', 'schema', 'migrate', 'migration'])
+                        
+                        # Design skills
+                        if 'Design' in skill or 'UX' in skill or 'UI' in skill:
+                            default_keywords.extend(['ui', 'ux', 'figma', 'sketch', 'mockup', 'wireframe',
+                                                   'prototype', 'design', 'layout', 'user interface', 'experience'])
+                        
+                        skill_keywords[skill] = list(set(default_keywords))  # Remove duplicates
+                    
+                    # Show and allow editing of keywords for each skill
+                    st.subheader("Skill Keywords")
+                    st.markdown("These keywords are used to match tasks with skills. Customize them if needed.")
+                    
+                    updated_keywords = {}
+                    for skill in all_skills:
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            st.markdown(f"**{skill}**")
+                        with col2:
+                            # Allow user to edit keywords
+                            keyword_input = st.text_input(
+                                f"Keywords for {skill}",
+                                value=", ".join(skill_keywords[skill]),
+                                key=f"keywords_{skill}"
+                            )
+                            updated_keywords[skill] = [k.strip().lower() for k in keyword_input.split(",")]
+                    
+                    # Perform the matching
+                    if st.button("Match Tasks to Skills"):
+                        # Function to check if task matches a skill based on keywords with more flexible matching
+                        def task_matches_skill(task_summary, keywords):
+                            summary_lower = task_summary.lower()
+                            
+                            # Basic word boundary regex pattern to make the matching smarter
+                            import re
+                            
+                            for keyword in keywords:
+                                if not keyword or not keyword.strip():
+                                    continue
+                                    
+                                keyword = keyword.strip().lower()
+                                
+                                # Direct substring matching (original method)
+                                if keyword in summary_lower:
+                                    return True
+                                    
+                                # Try word boundary matching for more precise matching
+                                # This helps prevent matching 'test' within 'fastest' but still matches 'test' as a whole word
+                                pattern = r'\b' + re.escape(keyword) + r'\b'
+                                if re.search(pattern, summary_lower):
+                                    return True
+                                    
+                                # For compound keywords with special characters, try splitting and matching parts
+                                if '/' in keyword or '-' in keyword or '_' in keyword:
+                                    parts = re.split(r'[/\-_]', keyword)
+                                    for part in parts:
+                                        if part and len(part) > 2 and part in summary_lower:  # Only match meaningful parts
+                                            return True
+                            
+                            return False
+                        
+                        # Create a dataframe for results
+                        results = []
+                        
+                        # For each task, find matching skills
+                        for _, task in issues_df.iterrows():
+                            task_summary = task.get('Summary', '')
+                            if not pd.isna(task_summary) and task_summary:
+                                task_key = task.get('Issue Key', 'Unknown')
+                                task_assignee = task.get('Assignee', 'Unassigned')
+                                task_status = task.get('Status', 'Unknown')
+                                
+                                # Skip completed tasks
+                                if task_status == 'Done':
+                                    continue
+                                
+                                # Find matching skills for this task
+                                matched_skills = []
+                                for skill, keywords in updated_keywords.items():
+                                    if task_matches_skill(task_summary, keywords):
+                                        matched_skills.append(skill)
+                                
+                                # Add to results
+                                if matched_skills:
+                                    for skill in matched_skills:
+                                        # Find resources with this skill
+                                        resources_with_skill = filtered_skills_df[filtered_skills_df['Skillset'] == skill]['Name'].unique().tolist()
+                                        
+                                        # Is current assignee in the matching resources?
+                                        assignee_has_skill = task_assignee in resources_with_skill
+                                        
+                                        results.append({
+                                            'Task Key': task_key,
+                                            'Summary': task_summary,
+                                            'Current Assignee': task_assignee,
+                                            'Task Status': task_status,
+                                            'Matching Skill': skill,
+                                            'Resources with Skill': ', '.join(resources_with_skill),
+                                            'Optimal Assignment': assignee_has_skill
+                                        })
+                        
+                        # Display results
+                        if results:
+                            results_df = pd.DataFrame(results)
+                            st.subheader("Skill-Task Matching Results")
+                            
+                            # Count of optimal vs. non-optimal assignments
+                            optimal_count = results_df['Optimal Assignment'].sum()
+                            total_matches = len(results_df)
+                            optimization_rate = (optimal_count / total_matches) * 100 if total_matches > 0 else 0
+                            
+                            st.metric(
+                                "Task-Skill Optimization Rate",
+                                f"{optimization_rate:.1f}%",
+                                help="Percentage of tasks assigned to resources with matching skills"
+                            )
+                            
+                            # Display detailed results in a table
+                            st.dataframe(results_df, use_container_width=True)
+                            
+                            # Visualization of skill-task distribution
+                            st.subheader("Skill-Task Distribution")
+                            skill_task_counts = results_df['Matching Skill'].value_counts().reset_index()
+                            skill_task_counts.columns = ['Skill', 'Task Count']
+                            
+                            fig = px.bar(
+                                skill_task_counts,
+                                x='Skill',
+                                y='Task Count',
+                                title="Number of Tasks per Skill Category",
+                                color='Skill'
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Task optimization suggestions
+                            st.subheader("✨ Task Optimization Suggestions")
+                            non_optimal = results_df[~results_df['Optimal Assignment']]
+                            
+                            if not non_optimal.empty:
+                                st.warning(f"Found {len(non_optimal)} tasks that could be better assigned based on skills")
+                                for _, row in non_optimal.iterrows():
+                                    st.markdown(f"**Task {row['Task Key']}**: {row['Summary']}")
+                                    st.markdown(f"- Currently assigned to: **{row['Current Assignee']}**")
+                                    st.markdown(f"- Requires skill: **{row['Matching Skill']}**")
+                                    st.markdown(f"- Suggested assignees: **{row['Resources with Skill']}**")
+                                    st.markdown("---")
+                            else:
+                                st.success("All tasks are optimally assigned based on skills!")
+                        else:
+                            st.info("No matching tasks found based on the current keywords.")
+                            
+                            # Add a debug section to help troubleshoot
+                            with st.expander("🔍 Debug Information"):
+                                st.subheader("Task Summary Analysis")
+                                st.markdown("This section shows task summaries to help you identify appropriate keywords for matching.")
+                                
+                                # Show available tasks and their summaries for debugging
+                                if issues_df is not None and not issues_df.empty and 'Summary' in issues_df.columns:
+                                    # Get active tasks (not Done)
+                                    active_tasks = issues_df[issues_df['Status'] != 'Done']
+                                    if not active_tasks.empty:
+                                        # Show the first 10 task summaries to help identify keywords
+                                        st.markdown("### Sample Task Summaries (First 10)")
+                                        for idx, task in active_tasks.head(10).iterrows():
+                                            summary = task.get('Summary', 'No summary')
+                                            key = task.get('Issue Key', 'Unknown')
+                                            assignee = task.get('Assignee', 'Unassigned')
+                                            st.markdown(f"**{key}** ({assignee}): {summary}")
+                                        
+                                        # Word frequency analysis to suggest keywords
+                                        st.markdown("### Common Words in Task Summaries")
+                                        st.markdown("These words appear frequently in task summaries and might be good matching keywords:")
+                                        
+                                        # Combine all summaries into one text
+                                        all_summaries = ' '.join(active_tasks['Summary'].dropna().astype(str).tolist()).lower()
+                                        
+                                        # Very basic word frequency without requiring NLTK
+                                        # Remove common punctuation
+                                        for char in ',.()[]{}:;"\'!?-/&':
+                                            all_summaries = all_summaries.replace(char, ' ')
+                                        
+                                        # Split into words and count frequencies
+                                        words = all_summaries.split()
+                                        # Remove common stopwords
+                                        stopwords = ['a', 'an', 'the', 'and', 'or', 'but', 'if', 'because', 'as', 'what',
+                                                     'for', 'in', 'on', 'to', 'of', 'at', 'by', 'is', 'are', 'am', 'was',
+                                                     'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
+                                                     'did', 'will', 'would', 'shall', 'should', 'can', 'could', 'this',
+                                                     'that', 'with', 'from', 'we', 'i', 'our', 'their', 'they', 'it']
+                                        
+                                        # Count word frequencies (excluding stopwords and short words)
+                                        word_freq = {}
+                                        for word in words:
+                                            if word not in stopwords and len(word) > 2:  # Skip very short words and stopwords
+                                                if word in word_freq:
+                                                    word_freq[word] += 1
+                                                else:
+                                                    word_freq[word] = 1
+                                        
+                                        # Get top words by frequency
+                                        top_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:20]
+                                        
+                                        # Display as a horizontal bar chart
+                                        if top_words:
+                                            words_df = pd.DataFrame(top_words, columns=['Word', 'Frequency'])
+                                            fig = px.bar(words_df, x='Frequency', y='Word', orientation='h',
+                                                        title="Top 20 Words in Task Summaries")
+                                            st.plotly_chart(fig, use_container_width=True)
+                                            
+                                            # Suggest keyword combinations
+                                            st.markdown("### Suggested Keyword Additions")
+                                            st.markdown("Consider adding these frequent words to your skill keywords:")
+                                            st.code(", ".join([word for word, _ in top_words[:10]]))
+                                    else:
+                                        st.info("No active tasks found in the data.")
+                                else:
+                                    st.warning("No task data available or missing 'Summary' column.")
+                                    
+                                # Explain matching logic
+                                st.markdown("### How Matching Works")
+                                st.markdown("""
+                                1. Each task summary is converted to lowercase
+                                2. For each skill\'s keywords, we check if any keyword is contained within the task summary
+                                3. If a match is found, the task is associated with that skill
+                                4. We then check if the assigned person has the required skill
+                                
+                                For best results:
+                                - Add relevant technical terms specific to your projects
+                                - Consider adding partial words that might appear in task descriptions
+                                - Check the task summaries above to identify common terminology used in your JIRA instance
+                                """)
+                                
+                                # Improved matching suggestion
+                                st.markdown("### Enhanced Matching Tips")
+                                st.markdown("""
+                                To improve matching results, try these approaches:
+                                1. **Add task types**: Add words like \'task\', \'story\', \'defect\', or \'epic\'
+                                2. **Add project terminology**: Add terms specific to your products or projects
+                                3. **Add responsibility terms**: Words like \'responsible\', \'assigned\', \'owner\'
+                                4. **Use partial words**: Sometimes using shorter word fragments works better (e.g., \'auth\' instead of \'authentication\')
+                                """)
+                            
+                            # Also add a section to allow direct skill assignment
+                            with st.expander("✏️ Manual Skill Assignment"):
+                                st.markdown("If automatic matching isn't working well, you can manually assign skills to tasks here.")
+                                
+                                if issues_df is not None and not issues_df.empty:
+                                    # Create a selectbox for task selection
+                                    active_tasks = issues_df[issues_df['Status'] != 'Done']
+                                    if not active_tasks.empty:
+                                        task_options = [f"{row.get('Issue Key', 'Unknown')} - {row.get('Summary', 'No summary')}" 
+                                                       for _, row in active_tasks.iterrows()]
+                                        selected_task = st.selectbox("Select Task", options=task_options, key="manual_task_select")
+                                        
+                                        # Extract task key from selection
+                                        task_key = selected_task.split(' - ')[0] if ' - ' in selected_task else "Unknown"
+                                        
+                                        # Create a multi-select for skill assignment
+                                        if all_skills:
+                                            selected_skills = st.multiselect("Assign Skills", options=all_skills, key="manual_skills_select")
+                                            
+                                            # If both task and skills are selected, add a button to assign
+                                            if selected_skills and task_key != "Unknown":
+                                                if st.button("Assign Skills to Task", key="assign_skill_button"):
+                                                    st.success(f"Skills {', '.join(selected_skills)} assigned to task {task_key}")
+                                                    st.info("This is a UI demonstration. In a production environment, this would update the JIRA database.")
+                                        else:
+                                            st.warning("No skills available in the data.")
+                                    else:
+                                        st.info("No active tasks found in the data.")
+                                else:
+                                    st.warning("No task data available.")
+                                    
+            
             # Add treemap at the bottom for overall skill distribution
             st.subheader("🌳 Treemap - Resource Distribution by Skillset")
             if not filtered_skills_df.empty:
                 filtered_skills_df['Count'] = 1
                 fig = px.treemap(
                     filtered_skills_df,
-                    path=['Skillset', 'Resource'],
+                    path=['Skillset', 'Name'],
                     values='Count',
                     title="Distribution of Resources by Skillset"
                 )
@@ -742,6 +1221,68 @@ def dashboard():
         else:
             st.warning("Skills data missing required columns.")
     
+    # Tab 5: Data Integrity
+    with viz_tabs[4]:
+        st.subheader("🔍 Data Integrity Check")
+        
+        # Import the check data integrity and format functions from utils
+        from utils import check_data_integrity, format_integrity_results
+        
+        # Make sure filtered_skills_df is initialized
+        if 'filtered_skills_df' not in locals() and skills_df is not None:
+            filtered_skills_df = skills_df.copy()
+            
+        # Run integrity checks on the filtered data
+        if issues_df is not None and skills_df is not None and worklogs_df is not None and leaves_df is not None:    
+            integrity_results = check_data_integrity(filtered_issues_df, filtered_skills_df if 'filtered_skills_df' in locals() else skills_df, filtered_worklogs_df, leaves_df)
+            
+            # Display results in a formatted way
+            formatted_results = format_integrity_results(integrity_results)
+            st.markdown(formatted_results)
+            
+            # Show data statistics
+            st.subheader("📊 Dataset Statistics")
+            stats_cols = st.columns(4)
+            
+            with stats_cols[0]:
+                st.metric("Issues", len(filtered_issues_df))
+                st.markdown(f"**Columns**: {len(filtered_issues_df.columns)}")
+                
+            with stats_cols[1]:
+                skills_df_to_use = filtered_skills_df if 'filtered_skills_df' in locals() else skills_df
+                st.metric("Resources", len(skills_df_to_use['Name'].unique()) if 'Name' in skills_df_to_use.columns else "N/A")
+                st.markdown(f"**Skills**: {len(skills_df_to_use['Skillset'].unique()) if 'Skillset' in skills_df_to_use.columns else 'N/A'}")
+                
+            with stats_cols[2]:
+                st.metric("Worklogs", len(filtered_worklogs_df))
+                if 'Time Spent (hrs)' in filtered_worklogs_df.columns:
+                    st.markdown(f"**Total Hours**: {filtered_worklogs_df['Time Spent (hrs)'].sum():.1f}")
+                    
+            with stats_cols[3]:
+                st.metric("Leave Records", len(leaves_df))
+                if 'Start Date' in leaves_df.columns and 'End Date' in leaves_df.columns:
+                    leave_days = (leaves_df['End Date'] - leaves_df['Start Date']).dt.days.sum()
+                    st.markdown(f"**Total Days**: {leave_days}")
+            
+            # Option to view raw data
+            with st.expander("View Raw Data Tables"):
+                data_tab = st.tabs(["Issues", "Skills", "Worklogs", "Leave Records"])
+                
+                with data_tab[0]:
+                    st.dataframe(filtered_issues_df, use_container_width=True, height=300)
+                    
+                with data_tab[1]:
+                    skills_df_to_use = filtered_skills_df if 'filtered_skills_df' in locals() else skills_df
+                    st.dataframe(skills_df_to_use, use_container_width=True, height=300)
+                    
+                with data_tab[2]:
+                    st.dataframe(filtered_worklogs_df, use_container_width=True, height=300)
+                    
+                with data_tab[3]:
+                    st.dataframe(leaves_df, use_container_width=True, height=300)
+        else:
+            st.error("Cannot perform data integrity checks. One or more required datasets are missing.")
+            
     # --------- Additional Reports & Resources ---------
     with st.expander("📋 Additional Reports"):
         st.markdown("### Detailed Reports")
@@ -786,7 +1327,10 @@ def ai_pm_buddy_assistant():
     global issues_df, skills_df, worklogs_df, leaves_df
     
     # Set up tabs for different PM Buddy features
-    ai_tabs = st.tabs(["Ask PM Buddy", "Smart PM Brief", "What-if Simulation", "Load Planning", "Conversation History", "Feedback Analysis"])
+    ai_tabs = st.tabs(["Ask PM Buddy", "Smart PM Brief", "What-if Simulation", "Leave Conflict Detection", "Task Redistribution", "AI Features", "Token Management", "Conversation History", "Feedback Analysis"])
+    
+    # Initialize the token manager for tracking GPT usage
+    token_manager = TokenManager()
     
     # ---------- Summarize Data ----------
     try:
@@ -823,17 +1367,21 @@ def ai_pm_buddy_assistant():
         st.error(f"Failed to summarize data: {e}")
         analytics_text = ""
     
-    # Initialize OpenAI client using Streamlit secrets
+    # Initialize OpenAI client using Streamlit secrets or environment variables
     try:
-        # Get the API key from Streamlit secrets - check both uppercase and lowercase variants
+        # Try to get the API key from Streamlit secrets first
         if 'OPENAI_API_KEY' in st.secrets:
             api_key = st.secrets['OPENAI_API_KEY']
-            st.success("Found OpenAI API key in secrets (uppercase version)!")
+            st.success("Found OpenAI API key in Streamlit secrets (uppercase version)!")
         elif 'openai_api_key' in st.secrets:
             api_key = st.secrets['openai_api_key']
-            st.success("Found OpenAI API key in secrets (lowercase version)!")
+            st.success("Found OpenAI API key in Streamlit secrets (lowercase version)!")
+        # If not in secrets, check environment variables
+        elif 'OPENAI_API_KEY' in os.environ:
+            api_key = os.environ['OPENAI_API_KEY']
+            st.success("Found OpenAI API key in environment variables!")
         else:
-            st.error("OpenAI API key not found in secrets. Please add it to your Streamlit Cloud secrets.")
+            st.error("OpenAI API key not found in secrets or environment variables. Please add it to your Streamlit Cloud secrets.")
             return
             
         client = OpenAI(api_key=api_key)
@@ -1520,12 +2068,17 @@ def ai_pm_buddy_assistant():
                 except Exception as e:
                     st.error(f"GPT Smart Brief failed: {e}")
     
-    # ---------- Tab 3: What-if Simulation ----------
+    # ---------- Tab 3: What-if Simulation & Task Redistribution ----------
     with ai_tabs[2]:
-        st.subheader("🔮 What-if Simulation")
+        st.subheader("🔮 What-if Simulation & Task Redistribution")
         
-        # Enhanced simulation options
-        simulation_type = st.radio(
+        # Create tabs for different simulation types
+        sim_tabs = st.tabs(["Schedule & Resource Simulation", "AI Task Redistribution"])
+        
+        # Tab 1: Original simulation functionality
+        with sim_tabs[0]:
+            # Enhanced simulation options
+            simulation_type = st.radio(
             "Simulation type:",
             ["Resource Unavailability", "Schedule Delay", "Scope Change"],
             horizontal=True
@@ -2068,8 +2621,61 @@ def ai_pm_buddy_assistant():
                     except Exception as e:
                         st.error(f"Scope Change Simulation failed: {e}")
     
-    # ---------- Tab 4: Load Redistribution Planning ----------
+    # ---------- Tab 3.5: Leave Conflict Detection ----------
     with ai_tabs[3]:
+        st.subheader("🚨 Leave Conflict Detection")
+        st.markdown("""
+        This feature proactively detects potential conflicts between team members' scheduled leaves 
+        and project tasks, allowing you to plan ahead and prevent delivery risks.
+        """)
+        
+        # Call the leave conflict detection module
+        detect_leave_conflicts(issues_df, skills_df, worklogs_df, leaves_df)
+    
+    # ---------- Tab 3.6: Task Redistribution ----------
+    with ai_tabs[4]:
+        st.subheader("🔄 AI-Based Task Redistribution")
+        st.markdown("""
+        This feature uses AI to analyze your team's current workload and skills to suggest 
+        optimal task redistribution when team members are overloaded or skills aren't properly matched.
+        """)
+        
+        # Call the AI-based task redistribution module
+        ai_based_task_redistribution(issues_df, skills_df, worklogs_df, leaves_df, client)
+    
+    # ---------- Tab 3.7: AI Features ----------
+    with ai_tabs[5]:
+        st.subheader("🧠 AI-Powered Project Management")
+        st.markdown("""Our new AI-powered JIRA features help you gain deeper insights into your project.""")
+        
+        # Create tabs for different AI features
+        ai_features_tabs = st.tabs(["Project Health Summary", "Task Prioritization", "Effort Estimation"])
+        
+        # Project Health Summary tab
+        with ai_features_tabs[0]:
+            generate_project_health_summary(issues_df, worklogs_df, skills_df, leaves_df)
+        
+        # Task Prioritization tab
+        with ai_features_tabs[1]:
+            ai_driven_task_prioritization(issues_df, worklogs_df, skills_df, leaves_df)
+        
+        # Effort Estimation tab
+        with ai_features_tabs[2]:
+            effort_estimation_refinement(issues_df, worklogs_df, skills_df, leaves_df)
+    
+    # ---------- Tab 3.8: Token Management ----------
+    with ai_tabs[6]:
+        st.subheader("💰 GPT Token Management")
+        st.markdown("""
+        This dashboard helps you monitor and manage your OpenAI API token usage to keep costs under control 
+        and prevent exceeding quota limits.
+        """)
+        
+        # Display the token management dashboard
+        token_manager.display_token_dashboard()
+    
+    # ---------- Tab 4: Load Redistribution Planning ----------
+    with ai_tabs[7]:
         st.subheader("📊 Load Redistribution Planning")
         
         planning_col1, planning_col2 = st.columns([2, 1])
@@ -2266,7 +2872,7 @@ def ai_pm_buddy_assistant():
                     st.exception(e)
 
     # ---------- Tab 5: Conversation History ----------
-    with ai_tabs[4]:
+    with ai_tabs[7]:
         st.subheader("💬 Conversation History")
         
         # Tabs for different types of history
@@ -2441,7 +3047,7 @@ def ai_pm_buddy_assistant():
                 st.info("No redistribution plans generated yet. Generate plans in the 'Load Planning' tab.")
     
     # ---------- Tab 6: Feedback Analysis ----------
-    with ai_tabs[5]:
+    with ai_tabs[8]:
         st.subheader("📊 AI Assistant Feedback Analysis")
         
         # Initialize feedback tracking if not already done
@@ -2610,5 +3216,9 @@ if nav_selection == "📊 Dashboard":
     dashboard()
 elif nav_selection == "📋 PM Daily Brief":
     pm_daily_brief()
+elif nav_selection == "🔍 Technical Debt & Risk":
+    technical_debt_risk_management(issues_df, skills_df, worklogs_df, leaves_df, tech_debt_df)
+elif nav_selection == "🏃‍♀️ Sprint Planning":
+    sprint_planning_assistant(issues_df, skills_df, worklogs_df, leaves_df)
 elif nav_selection == "🤖 AI PM Buddy":
     ai_pm_buddy_assistant()
