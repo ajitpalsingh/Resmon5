@@ -12,8 +12,16 @@ import json
 import openai
 import os
 from openai import OpenAI
-import networkx as nx
-import matplotlib.pyplot as plt
+try:
+    import networkx as nx
+    import matplotlib.pyplot as plt
+    NETWORK_VISUALIZATION_AVAILABLE = True
+except ImportError:
+    NETWORK_VISUALIZATION_AVAILABLE = False
+    # Define fallback function for dependency visualization if networkx is not available
+    def visualize_dependencies(G, critical_path=None):
+        """Fallback function when networkx is not available"""
+        return "Dependency visualization requires networkx and matplotlib libraries."
 import io
 import base64
 from PIL import Image
@@ -282,52 +290,60 @@ def analyze_task_dependencies(active_issues, dependencies_df=None):
 
 def visualize_dependencies(G, critical_path=None):
     """Create a visualization of task dependencies with critical path highlighted"""
+    if not NETWORK_VISUALIZATION_AVAILABLE:
+        return None
+        
     if not G or len(G.nodes) == 0:
         return None
     
-    plt.figure(figsize=(12, 8))
-    pos = nx.spring_layout(G, seed=42)  # Consistent layout
-    
-    # Draw regular nodes
-    nx.draw_networkx_nodes(G, pos, node_size=500, node_color='lightblue')
-    
-    # Draw critical path nodes in red
-    if critical_path:
-        critical_nodes = set(critical_path)
-        nx.draw_networkx_nodes(G, pos, nodelist=list(critical_nodes), 
-                              node_size=500, node_color='red')
-    
-    # Draw edges
-    nx.draw_networkx_edges(G, pos, width=1.0, arrowsize=20)
-    
-    # Add edge labels (dependency types)
-    edge_labels = {(u, v): d['type'] for u, v, d in G.edges(data=True)}
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
-    
-    # Add node labels
-    node_labels = {}
-    for node in G.nodes():
-        assignee = G.nodes[node].get('assignee', '')
-        summary_short = G.nodes[node].get('summary', '')[:15] + '...' \
-                       if len(G.nodes[node].get('summary', '')) > 15 \
-                       else G.nodes[node].get('summary', '')
-        node_labels[node] = f"{node}\n{assignee}\n{summary_short}"
-    
-    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=8, 
-                           verticalalignment='center')
-    
-    plt.title("Task Dependency Network (Red = Critical Path)")
-    plt.axis('off')
-    
-    # Save figure to a bytes buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    
-    # Convert to base64 for Streamlit
-    img = Image.open(buf)
-    return img
+    try:
+        plt.figure(figsize=(12, 8))
+        pos = nx.spring_layout(G, seed=42)  # Consistent layout
+        
+        # Draw regular nodes
+        nx.draw_networkx_nodes(G, pos, node_size=500, node_color='lightblue')
+        
+        # Draw critical path nodes in red
+        if critical_path:
+            critical_nodes = set(critical_path)
+            nx.draw_networkx_nodes(G, pos, nodelist=list(critical_nodes), 
+                                node_size=500, node_color='red')
+        
+        # Draw edges
+        nx.draw_networkx_edges(G, pos, width=1.0, arrowsize=20)
+        
+        # Add edge labels (dependency types)
+        edge_labels = {(u, v): d['type'] for u, v, d in G.edges(data=True)}
+        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
+        
+        # Add node labels
+        node_labels = {}
+        for node in G.nodes():
+            assignee = G.nodes[node].get('assignee', '')
+            summary_short = G.nodes[node].get('summary', '')[:15] + '...' \
+                        if len(G.nodes[node].get('summary', '')) > 15 \
+                        else G.nodes[node].get('summary', '')
+            node_labels[node] = f"{node}\n{assignee}\n{summary_short}"
+        
+        nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=8, 
+                            verticalalignment='center')
+        
+        plt.title("Task Dependency Network (Red = Critical Path)")
+        plt.axis('off')
+        
+        # Save figure to a bytes buffer
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        plt.close()
+        
+        # Convert to base64 for Streamlit
+        img = Image.open(buf)
+        return img
+    except Exception as e:
+        import streamlit as st
+        st.warning(f"Could not create dependency visualization: {str(e)}")
+        return None
 
 def generate_workload_recommendations(active_issues, overloaded, underloaded, workload_analysis, 
                                      skill_map=None, consider_priority=True, dependencies_df=None, 

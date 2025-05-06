@@ -76,12 +76,25 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Project Deployment")
 
 # Verify the zip file exists before showing the download button
+cloud_zip_file_path = "jira_resource_management_cloud_deploy.zip"
+if os.path.exists(cloud_zip_file_path):
+    with open(cloud_zip_file_path, "rb") as fp:
+        cloud_zip_data = fp.read()
+    st.sidebar.download_button(
+        label="📥 Download Cloud Deployment Package",
+        data=cloud_zip_data,
+        file_name="jira_resource_management_cloud_deploy.zip",
+        mime="application/zip",
+        help="Download a ZIP file containing all the project files for Streamlit Cloud deployment"
+    )
+
+# Keep original deployment package if it exists
 zip_file_path = "jira_resource_management_app.zip"
 if os.path.exists(zip_file_path):
     with open(zip_file_path, "rb") as fp:
         zip_data = fp.read()
     st.sidebar.download_button(
-        label="📥 Download Deployment Package",
+        label="📥 Download Full Deployment Package",
         data=zip_data,
         file_name="jira_resource_management_app.zip",
         mime="application/zip",
